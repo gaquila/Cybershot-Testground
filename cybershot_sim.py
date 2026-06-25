@@ -254,6 +254,7 @@ EFFECT_VALUE = {
     "flex": 1.5, "master_none": 4.0,
     "ld_move_leth":1.5,"ld_move_mit":1.5,"ld_stance":1.5,"ld_shieldcannon":1.5,"ld_bastion":2.0,
     "ld_flagelator":1.5,"ld_salve":2.0,"ld_jester":2.0,"ld_tactimancer":2.5,
+    "ld_pos_leth":1.5,"ld_berserk":1.5,"ld_aoe":2.0,"ld_psionic":2.0,"ld_hexer":1.5,"ld_wellspring":2.0,
     "eq_finalvault":1.0,"eq_phase":1.0,"eq_kinetic":1.5,"eq_chip":1.5,"eq_backcap":1.5,
     "eq_recoil":1.5,"eq_cloak":1.5,"eq_gps":2.0,
 }
@@ -755,9 +756,15 @@ def compute_attack(team, target, cfg, track):
         if loc.effect=="rangeboost" or tloc.effect=="rangeboost": val += 2
         if tloc.effect=="rangeguard": val -= 4
     if "momentum" in active_quirks(team) and team.moved_this_turn: val += 1
+    if cfg.enable_loadout_abilities:
+        if any("ld_pos_leth" in g.tags for g in team.glads if not g.downed):
+            val += -1 if is_melee else 1   # Cyberhawk: reward attacking out of location
+        for g in team.glads:               # Psionic: use W-as-L when attacking if higher #APPROX
+            if not g.downed and "ld_psionic" in g.tags and g.base[W] > g.base[L]:
+                val += g.base[W] - g.base[L]
     return val
 
-def resolve_attack(team, target, cfg, track):
+def resolve_attack(team, target, cfg, track, teams=None):
     if target is None or target.finished_round is not None: return 0
     d = target.loc_idx - team.loc_idx; reach = attack_reach(team, cfg)
     in_range = (d==0) or ((0<d<=reach) if cfg.ranged_forward_only else (0<abs(d)<=reach))
@@ -771,6 +778,13 @@ def resolve_attack(team, target, cfg, track):
     is_ranged = (target.loc_idx - team.loc_idx) != 0
     if cfg.enable_equip_abilities and is_ranged and any("eq_backcap" in g.tags for g in target.glads if not g.downed):
         val -= 1
+    if cfg.enable_loadout_abilities:   # VoltBerserker: spend min HP to break through mit #APPROX
+        bh = next((g for g in team.glads if not g.downed and "ld_berserk" in g.tags and g.hp >= 2), None)
+        if bh is not None and val <= mit:
+            invest = min(mit - val + 1, bh.hp - 1, ABILITY_CAP)
+            if invest > 0:
+                val += invest
+                deal_to_gladiator(bh, invest)
     if cfg.uncapped:
         dmg = max(0, val - mit)
     else:
@@ -804,6 +818,12 @@ def resolve_attack(team, target, cfg, track):
             add_temp(team, M, -2); add_temp(team, S, -2)
     if cfg.enable_loadout_abilities and dmg > 0 and any("ld_flagelator" in g.tags for g in target.glads if not g.downed):
         deal_direct(team, 1)
+    if teams is not None and is_ranged and cfg.enable_loadout_abilities \
+            and any("ld_aoe" in g.tags for g in team.glads if not g.downed):
+        for o in teams:   # SurgeBomber: ranged attack splashes all teams at target location
+            if o is team or o is target or o.finished_round is not None: continue
+            if o.loc_idx == target.loc_idx:
+                resolve_attack(team, o, cfg, track, teams=None)
     return dmg
 
 def allocate_damage(target, dmg):
@@ -818,6 +838,21 @@ def allocate_damage(target, dmg):
 
 def deal_direct(target, amount):
     allocate_damage(target, amount)
+
+def deal_to_gladiator(glad, amount):
+    """Deal damage directly to a specific gladiator (equipment drawbacks)."""
+    for _ in range(amount):
+        if glad.downed: break
+        if glad.quirk == "endure" and not glad.endured:
+            glad.endured = True; continue
+        glad.hp -= 1; glad.dmg_round += 1; glad.dmg_total += 1
+        if glad.hp <= 0: glad.downed = True; glad.hp = 0
+
+def deal_to_holder(team, tag, amount):
+    """Deal drawback damage to the gladiator assigned the item with the given tag."""
+    holder = next((g for g in team.glads if tag in g.tags and not g.downed), None)
+    if holder:
+        deal_to_gladiator(holder, amount)
 
 def resolve_move(team, teams, cfg, track):
     if team.extracting and cfg.vault_extract_counter > 0:
@@ -842,6 +877,11 @@ def resolve_move(team, teams, cfg, track):
                     speed += cfg.slipstream_bonus * behind
                 else:
                     speed += cfg.slipstream_bonus
+    if cfg.enable_loadout_abilities:   # Hexer: enemies sharing your location move -2 Speed
+        for o in teams:
+            if o is not team and o.finished_round is None and o.loc_idx == team.loc_idx \
+                    and any("ld_hexer" in g.tags for g in o.glads if not g.downed):
+                speed -= 2; break
     speed = max(0, int(round(speed)))
     if team.trav_remaining <= 0 and team.trav_i < len(loc.trav):
         team.trav_remaining = loc.trav[team.trav_i]
@@ -870,7 +910,7 @@ def advance(team, teams, cfg, track):
 def resolve_breach(team, teams, cfg, track, rng=None):
     if cfg.enable_equip_abilities and not team.extracting and any("breach_strain" in g.tags for g in team.glads if not g.downed):
         if not (cfg.soften_drawbacks and rng is not None and rng.random() < 0.5):
-            deal_direct(team, 1)
+            deal_to_holder(team, "breach_strain", 1)
     if team.extracting:
         if cfg.vault_extract_counter > 0:
             return
@@ -879,6 +919,10 @@ def resolve_breach(team, teams, cfg, track, rng=None):
     loc = track[team.loc_idx]
     if loc.breach <= 0 or team.breach_remaining <= 0: return
     team.hack_intent += pooled(team, cfg, halfway(team))[W]
+    if cfg.enable_loadout_abilities:   # Psionic: use L-as-W when breaching if higher #APPROX
+        for g in team.glads:
+            if not g.downed and "ld_psionic" in g.tags and g.base[L] > g.base[W]:
+                team.hack_intent += g.base[L] - g.base[W]
 
 def apply_hack(team, teams, cfg, track):
     if team.extracting:
@@ -931,11 +975,14 @@ def heal_team(team, amount, cfg):
     if has_ability(team, "heal_boost"): boost += 1
     if cfg.easy_revive: boost += 1
     amount += boost; team.healed_this_turn = True
+    restored = False
     for g in sorted(team.glads, key=lambda x: (not x.downed, x.hp)):
         if amount <= 0: break
-        if g.downed: g.downed=False; g.hp=1; amount-=1
+        if g.downed: g.downed=False; g.hp=1; amount-=1; restored=True
         elif g.hp < g.maxhp and not (cfg.enable_equip_abilities and getattr(g,"no_heal",False)):
-            h = min(amount, g.maxhp-g.hp); g.hp += h; amount -= h
+            h = min(amount, g.maxhp-g.hp); g.hp += h; amount -= h; restored=True
+    if restored and cfg.enable_loadout_abilities and any("ld_wellspring" in g.tags for g in team.glads if not g.downed):
+        team.wellspring_pending = getattr(team, "wellspring_pending", 0) + 1
 
 def play_game(cfg, rng, drafters=None):
     if drafters is None: drafters = [True]*cfg.n_players
@@ -952,6 +999,7 @@ def run_engine(cfg, rng, teams, track):
             for _ in range(cfg.start_hand):
                 if t.deck: t.hand.append(t.deck.pop())
         t.tiebreak = rng.random()
+        t.wellspring_pending = 0
     first_down_team = None; midpoint_leader = None; first_extractor = None; gemheart_taken = False; gemheart_destroyed = False
     init = list(range(len(teams))); rng.shuffle(init)
     for rnd in range(cfg.max_rounds):
@@ -967,7 +1015,7 @@ def run_engine(cfg, rng, teams, track):
             if t.finished_round is None:
                 if cfg.enable_equip_abilities and not t.moved_this_turn and any("idle_strain" in g.tags for g in t.glads if not g.downed):
                     if not (cfg.soften_drawbacks and rng.random() < 0.5):
-                        deal_direct(t, 1)
+                        deal_to_holder(t, "idle_strain", 1)
                 t.moved_this_turn = False; t.healed_this_turn = False
                 t.disrupted_this_turn = False; t.hack_intent = 0; t.braced = False
                 t.attacked_this_turn = False; t.braced_this_turn = False; t.times_attacked = 0
@@ -976,6 +1024,8 @@ def run_engine(cfg, rng, teams, track):
                 if not cfg.enable_char_abilities:
                     for g in t.glads: g.endured = False
                 draw_hand(t, cfg, rng)
+                if getattr(t, "wellspring_pending", 0):
+                    _draw_n(t, cfg, rng, t.wellspring_pending); t.wellspring_pending = 0
                 if cfg.enable_char_abilities and "live_off_land" in active_quirks(t) and not t.hand:
                     _draw_n(t, cfg, rng, 1)
                 if cfg.enable_loadout_abilities and any("ld_salve" in g.tags for g in t.glads if not g.downed):
@@ -1015,7 +1065,7 @@ def run_engine(cfg, rng, teams, track):
             if t.finished_round is not None: continue
             if atype == "attack":
                 if target is not None: target.times_attacked += 1
-                resolve_attack(t, target, cfg, track)
+                resolve_attack(t, target, cfg, track, teams=teams)
                 t.attacked_this_turn = True
                 if first_down_team is None and target is not None and any_downed(target):
                     first_down_team = t.pid
@@ -1031,7 +1081,7 @@ def run_engine(cfg, rng, teams, track):
                 for _ in range(cfg.free_attack_per_turn):
                     tgt = best_attack_target(t, teams, cfg, track)
                     if tgt is None: break
-                    resolve_attack(t, tgt, cfg, track)
+                    resolve_attack(t, tgt, cfg, track, teams=teams)
                     if first_down_team is None and any_downed(tgt):
                         first_down_team = t.pid
         for t in teams:
@@ -1088,6 +1138,19 @@ def result(winner, teams, ml, fd, rounds, cfg, timeout=False, first_extractor=No
     }
 def cfg_drafters(cfg, teams): return [True]*len(teams)
 
+def V5_CONFIG():
+    """Locked V5 effects-on baseline. soften_drawbacks dropped (full frequency,
+    equipment drawback damage routed to the holding gladiator)."""
+    return Config(
+        n_players=4, draft_type="winchester", new_combat=True, uncapped=True,
+        slipstream_graduated=True, slipstream_bonus=3, gate_counter=5,
+        gate_attack_prob=0.5, hack_disrupt="freeze", vault_extract_counter=0,
+        draw_per_turn=1, hand_size=4, regroup=True, start_hand=4,
+        first_entry_penalty=3,
+        enable_char_abilities=True, enable_loadout_abilities=True,
+        enable_equip_abilities=True, soften_drawbacks=False,
+    )
+
 def run_config(cfg, n_games, seed=0, drafters=None):
     _YOMI["standoff"] = 0; _YOMI["multi"] = 0
     for k in _COMBAT: _COMBAT[k] = 0
@@ -1135,8 +1198,10 @@ def summarize(results, cfg):
     }
 
 if __name__ == "__main__":
-    cfg = Config()
+    PRUNED = {'RecoilHarness','StaticCloak','RedlineArray','GPS','Caltraps'}
+    cfg = V5_CONFIG()
     out = run_config(cfg, 300, seed=1)
-    print("Smoke test (default config, 300 games):")
+    print("Smoke test (locked V5 baseline, 300 games):")
     for k, v in out.items():
         print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
+    print(f"  cap-alarm: {dict(_CAPALARM)}")
