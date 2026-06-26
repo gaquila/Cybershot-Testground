@@ -70,13 +70,13 @@ LOADOUTS = {
     "Tactimancer":     ([M,W], "ld_tactimancer", None),
 }
 EQUIPMENT = {
-    "BigHammer":       ([ 3,0,-1,0,0], None),
-    "OverladenCuirass":([ 0,3,-1,0,0], None),
+    "BigHammer":       ([ 2,-1,0,0,0], None),
+    "OverladenCuirass":([ -1,2,0,0,0], None),
     "VoltScope":       ([ 1,0, 0,0,0], "ranged_range"),
     "MagplateCowl":    ([ 0,2, 0,0,0], "eq_finalvault"),
     "PhaseSyncBand":   ([ 0,0, 1,0,0], "eq_phase"),
     "SerratedVambrace":([ 1,0, 0,0,0], "eq_serrated"),
-    "TwinCoreBlades":  ([ 2,-2,0,0,0], "melee"),
+    "TwinCoreBlades":  ([ 3,-1,0,0,-1], "melee"),
     "KineticGreaves":  ([ 0,0, 2,0,0], "idle_strain"),
     "KineticLattice":  ([ 0,2, 0,0,0], "eq_kinetic"),
     "SurefireBuckler": ([ 0,3, 0,0,0], "guard_strain"),
@@ -89,6 +89,15 @@ EQUIPMENT = {
     "RedlineArray":    ([ 0,0,-1,0,0], "eq_redline"),
     "GPS":             ([ 0,0, 0,0,0], "eq_gps"),
     "Caltraps":        ([ 0,0, 0,0,0], "eq_caltraps"),
+    "MagneticGrapple": ([ 0,0, 0,0,0], "eq_grapple"),   # +2 S if not Leader
+    "TheftProtocol":   ([ 0,0, 0,0,0], "eq_theft"),     # +3 W if not Leader, -1 W if Leader
+    "HunterKillerScope":([ 0,0,0,0,0], "eq_hkscope"),   # +2 L when attacking the Leader
+    "JammerProtocol":  ([ 0,0, 0,0,1], "eq_jammer"),    # +1 W; if not Leader, Leader -1 W
+    "KineticSapper":   ([ 0,0, 1,0,0], "eq_sapper"),    # +1 S; if not Leader, Leader -1 S
+    "SlipstreamDrafter":([ 0,0,0,0,0], "eq_slipdraft"),  # +1 S per location Leader is ahead of you
+    "TariffField":     ([ 0,0, 1,0,1], "eq_tariff"),     # +1 S,+1 W; Leader's first-entry penalty +2
+    "VaultSiphon":     ([ 0,0, 0,0,1], "eq_siphon"),     # +1 W; when Leader breaches, you gain +1 breach
+    "UnderdogProtocol":([ 0,0, 0,0,0], "eq_underdog"),   # +3 to your lowest stat while in last place
 }
 CARD_TYPES = {
     "MA": ("move","attack"), "MB": ("move","breach"), "BA": ("breach","attack"),
@@ -257,6 +266,8 @@ EFFECT_VALUE = {
     "ld_pos_leth":1.5,"ld_berserk":1.5,"ld_aoe":2.0,"ld_psionic":2.0,"ld_hexer":1.5,"ld_wellspring":2.0,
     "eq_finalvault":1.0,"eq_phase":1.0,"eq_kinetic":1.5,"eq_chip":1.5,"eq_backcap":1.5,
     "eq_recoil":1.5,"eq_cloak":1.5,"eq_gps":2.0,
+    "eq_grapple":1.5,"eq_theft":2.0,"eq_hkscope":1.5,"eq_jammer":1.5,"eq_sapper":1.5,
+    "eq_slipdraft":2.5,"eq_tariff":2.5,"eq_siphon":2.0,"eq_underdog":2.0,
 }
 def effect_value(name, kind, cfg):
     if kind == "equip":
@@ -394,6 +405,7 @@ def gear_temp(team, cfg, track):
     if not (lo or eq): return m
     moved = team.moved_this_turn; atkd = team.attacked_this_turn; brcd = team.braced_this_turn
     final_vault = team.loc_idx == N_LOC-1
+    not_ldr = not getattr(team, "is_leader_now", False)
     for g in team.glads:
         if g.downed: continue
         T = g.tags
@@ -409,6 +421,14 @@ def gear_temp(team, cfg, track):
             if "eq_finalvault" in T and final_vault: m[W]+=2
             if "eq_phase" in T and moved: m[W]+=1
             if "eq_kinetic" in T: m[S]+=min(ABILITY_CAP, g.dmg_total)
+            if "eq_grapple" in T and not_ldr: m[S]+=2
+            if "eq_theft" in T: m[W]+= (3 if not_ldr else -1)
+            if "eq_slipdraft" in T and not_ldr: m[S]+= getattr(team, "leader_gap", 0)
+    if eq and getattr(team, "is_last_now", False) and any("eq_underdog" in g.tags for g in team.glads if not g.downed):
+        tot = [sum(g.base[i] for g in team.glads if not g.downed) + m[i] for i in range(5)]
+        m[min(range(5), key=lambda i: tot[i])] += 3   # Underdog: +3 to lowest stat in last place
+    if eq and getattr(team, "is_leader_now", False):
+        m[W]-=getattr(team, "ext_w_pen", 0); m[S]-=getattr(team, "ext_s_pen", 0)
     return m
 
 def pooled(team, cfg, halfw, full=False):
@@ -433,6 +453,22 @@ def pooled(team, cfg, halfw, full=False):
 
 def at_hack(t, track): return track[t.loc_idx].breach > 0
 def halfway(t): return t.loc_idx >= 4
+
+def race_leader(teams):
+    active = [t for t in teams if t.finished_round is None]
+    if not active: return None
+    s = sorted(active, key=lambda t: (t.loc_idx, -t.trav_remaining), reverse=True)
+    if len(s) >= 2 and (s[0].loc_idx, -s[0].trav_remaining) == (s[1].loc_idx, -s[1].trav_remaining):
+        return None  # exact tie for first => no leader
+    return s[0]
+
+def race_last(teams):
+    active = [t for t in teams if t.finished_round is None]
+    if not active: return None
+    s = sorted(active, key=lambda t: (t.loc_idx, -t.trav_remaining))
+    if len(s) >= 2 and (s[0].loc_idx, -s[0].trav_remaining) == (s[1].loc_idx, -s[1].trav_remaining):
+        return None  # exact tie for last => no clear underdog
+    return s[0]
 def team_wiped(t): return all(g.downed for g in t.glads)
 def any_downed(t): return any(g.downed for g in t.glads)
 
@@ -762,6 +798,9 @@ def compute_attack(team, target, cfg, track):
         for g in team.glads:               # Psionic: use W-as-L when attacking if higher #APPROX
             if not g.downed and "ld_psionic" in g.tags and g.base[W] > g.base[L]:
                 val += g.base[W] - g.base[L]
+    if cfg.enable_equip_abilities and getattr(target, "is_leader_now", False) \
+            and any("eq_hkscope" in g.tags for g in team.glads if not g.downed):
+        val += 2   # Hunter Killer Scope: +2 L vs the Leader
     return val
 
 def resolve_attack(team, target, cfg, track, teams=None):
@@ -902,9 +941,16 @@ def advance(team, teams, cfg, track):
     team.breach_remaining = loc.breach
     if cfg.first_entry_penalty and not any(
             o is not team and o.finished_round is None and o.loc_idx >= team.loc_idx for o in teams):
-        team.trav_remaining += cfg.first_entry_penalty
+        pen = cfg.first_entry_penalty
+        if cfg.enable_equip_abilities and getattr(team, "is_leader_now", False):
+            ntar = sum(1 for o in teams if o is not team and o.finished_round is None
+                       and any("eq_tariff" in g.tags for g in o.glads if not g.downed))
+            pen += 2 * ntar
+        team.trav_remaining += pen
     if cfg.enable_char_abilities and "heal_exit" in active_quirks(team):
         heal_team(team, 1, cfg)
+    if cfg.enable_equip_abilities and any("eq_gps" in g.tags for g in team.glads if not g.downed):
+        team.gps_pending = getattr(team, "gps_pending", 0) + 1   # GPS: draw on traversal resolve
     if loc.effect == "heal": heal_team(team, 1, cfg)
 
 def resolve_breach(team, teams, cfg, track, rng=None):
@@ -923,6 +969,11 @@ def resolve_breach(team, teams, cfg, track, rng=None):
         for g in team.glads:
             if not g.downed and "ld_psionic" in g.tags and g.base[L] > g.base[W]:
                 team.hack_intent += g.base[L] - g.base[W]
+    if cfg.enable_equip_abilities and getattr(team, "is_leader_now", False):
+        for o in teams:   # Vault Siphon: trailing holders advance when the Leader breaches
+            if o is team or o.finished_round is not None: continue
+            if any("eq_siphon" in g.tags for g in o.glads if not g.downed):
+                o.breach_remaining = max(0, o.breach_remaining - 1)
 
 def apply_hack(team, teams, cfg, track):
     if team.extracting:
@@ -1000,10 +1051,35 @@ def run_engine(cfg, rng, teams, track):
                 if t.deck: t.hand.append(t.deck.pop())
         t.tiebreak = rng.random()
         t.wellspring_pending = 0
+        t.breached_this_turn = False
+        t.gps_pending = 0
+        t.is_leader_now = False; t.ext_w_pen = 0; t.ext_s_pen = 0
+        t.is_last_now = False; t.leader_gap = 0
     first_down_team = None; midpoint_leader = None; first_extractor = None; gemheart_taken = False; gemheart_destroyed = False
     init = list(range(len(teams))); rng.shuffle(init)
+    leader_log = []
+    eff_sum = {t.pid: [0.0]*5 for t in teams}; eff_cnt = {t.pid: 0 for t in teams}
     for rnd in range(cfg.max_rounds):
         init = init[1:] + init[:1]
+        ldr = race_leader(teams)
+        frontier = max((t.loc_idx for t in teams if t.finished_round is None), default=0)
+        leader_log.append((ldr.pid if ldr is not None else None, frontier))
+        last = race_last(teams)
+        njam = sum(1 for o in teams if o is not ldr and o.finished_round is None
+                   and any("eq_jammer" in g.tags for g in o.glads if not g.downed))
+        nsap = sum(1 for o in teams if o is not ldr and o.finished_round is None
+                   and any("eq_sapper" in g.tags for g in o.glads if not g.downed))
+        for t in teams:
+            t.is_leader_now = (ldr is not None and t is ldr)
+            t.is_last_now = (last is not None and t is last)
+            t.leader_gap = max(0, ldr.loc_idx - t.loc_idx) if (ldr is not None and t is not ldr) else 0
+            t.ext_w_pen = 2*njam if t.is_leader_now else 0   # Jammer: -2 W to Leader per holder
+            t.ext_s_pen = 2*nsap if t.is_leader_now else 0   # Sapper: -2 S to Leader per holder
+        for t in teams:   # sample EFFECTIVE stats (base + temp + gear/leader-conditional) for calibration & effective-rho
+            if t.finished_round is None:
+                p = pooled(t, cfg, halfway(t), full=True)
+                for i in range(5): eff_sum[t.pid][i] += p[i]
+                eff_cnt[t.pid] += 1
         if cfg.blue_shell_prob > 0:
             active = [t for t in teams if t.finished_round is None]
             if len(active) >= 2:
@@ -1013,10 +1089,10 @@ def run_engine(cfg, rng, teams, track):
                     leader.trav_remaining += cfg.blue_shell_knockback
         for t in teams:
             if t.finished_round is None:
-                if cfg.enable_equip_abilities and not t.moved_this_turn and any("idle_strain" in g.tags for g in t.glads if not g.downed):
+                if cfg.enable_equip_abilities and not t.moved_this_turn and not getattr(t, "breached_this_turn", False) and any("idle_strain" in g.tags for g in t.glads if not g.downed):
                     if not (cfg.soften_drawbacks and rng.random() < 0.5):
                         deal_to_holder(t, "idle_strain", 1)
-                t.moved_this_turn = False; t.healed_this_turn = False
+                t.moved_this_turn = False; t.healed_this_turn = False; t.breached_this_turn = False
                 t.disrupted_this_turn = False; t.hack_intent = 0; t.braced = False
                 t.attacked_this_turn = False; t.braced_this_turn = False; t.times_attacked = 0
                 t.temp_mods = [0,0,0,0,0]
@@ -1026,6 +1102,8 @@ def run_engine(cfg, rng, teams, track):
                 draw_hand(t, cfg, rng)
                 if getattr(t, "wellspring_pending", 0):
                     _draw_n(t, cfg, rng, t.wellspring_pending); t.wellspring_pending = 0
+                if getattr(t, "gps_pending", 0):
+                    _draw_n(t, cfg, rng, t.gps_pending); t.gps_pending = 0
                 if cfg.enable_char_abilities and "live_off_land" in active_quirks(t) and not t.hand:
                     _draw_n(t, cfg, rng, 1)
                 if cfg.enable_loadout_abilities and any("ld_salve" in g.tags for g in t.glads if not g.downed):
@@ -1070,7 +1148,7 @@ def run_engine(cfg, rng, teams, track):
                 if first_down_team is None and target is not None and any_downed(target):
                     first_down_team = t.pid
             elif atype == "move": resolve_move(t, teams, cfg, track)
-            elif atype == "breach": resolve_breach(t, teams, cfg, track, rng)
+            elif atype == "breach": t.breached_this_turn = True; resolve_breach(t, teams, cfg, track, rng)
             elif atype == "heal": heal_team(t, 1, cfg)
             elif atype == "draw": _draw_n(t, cfg, rng, cfg.draw_card_amount)
             elif atype == "defend": t.braced = True; t.braced_this_turn = True
@@ -1109,30 +1187,61 @@ def run_engine(cfg, rng, teams, track):
         won = [t for t in teams if t.won]
         if won:
             winner = max(won, key=lambda t: sum(g.hp for g in t.glads))
-            return result(winner.pid, teams, midpoint_leader, first_down_team, rnd, cfg, first_extractor=first_extractor)
+            return result(winner.pid, teams, midpoint_leader, first_down_team, rnd, cfg, first_extractor=first_extractor, leader_log=leader_log, eff=(eff_sum, eff_cnt))
         if gemheart_destroyed:
-            return result(None, teams, midpoint_leader, first_down_team, rnd, cfg,
-                          first_extractor=first_extractor, draw=True)
+            return result(None, teams, midpoint_leader, first_down_team, rnd, cfg, leader_log=leader_log,
+                          first_extractor=first_extractor, draw=True, eff=(eff_sum, eff_cnt))
         if all(t.finished_round is not None for t in teams): break
     active = [t for t in teams if not team_wiped(t)]
     if cfg.vault_extract_counter > 0 and gemheart_taken:
-        return result(None, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg,
-                      timeout=True, first_extractor=first_extractor, draw=True)
+        return result(None, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg, leader_log=leader_log,
+                      timeout=True, first_extractor=first_extractor, draw=True, eff=(eff_sum, eff_cnt))
     if active:
         w = max(active, key=lambda t: (t.extracting, t.loc_idx, -t.breach_remaining, sum(g.hp for g in t.glads)))
-        return result(w.pid, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg, timeout=True, first_extractor=first_extractor)
-    return result(None, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg, timeout=True, first_extractor=first_extractor)
+        return result(w.pid, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg, timeout=True, first_extractor=first_extractor, leader_log=leader_log, eff=(eff_sum, eff_cnt))
+    return result(None, teams, midpoint_leader, first_down_team, cfg.max_rounds, cfg, timeout=True, first_extractor=first_extractor, leader_log=leader_log, eff=(eff_sum, eff_cnt))
 
-def result(winner, teams, ml, fd, rounds, cfg, timeout=False, first_extractor=None, draw=False):
+def result(winner, teams, ml, fd, rounds, cfg, timeout=False, first_extractor=None, draw=False, leader_log=None, eff=None):
+    eff_sum, eff_cnt = eff if eff else ({}, {})
+    eff_stats = {t.pid: [eff_sum.get(t.pid, [0]*5)[i] / max(1, eff_cnt.get(t.pid, 0)) for i in range(5)]
+                 for t in teams}
+    # --- snowball metrics from the per-round (leader, frontier) log ---
+    log = leader_log or []
+    # lead-changes: collapse consecutive equal defined leaders over the whole race
+    defined = [pid for (pid, floc) in log if pid is not None]
+    collapsed = [p for i, p in enumerate(defined) if i == 0 or p != defined[i-1]]
+    lead_changes = max(0, len(collapsed) - 1)
+    first_leader = collapsed[0] if collapsed else None
+    wire_to_wire = (1 if (winner is not None and first_leader is not None and winner == first_leader)
+                    else (0 if (winner is not None and first_leader is not None) else None))
+    # concentration over the CONTESTED window only (frontier past the start cluster,
+    # before the final-vault lock-in), with no-leader/tie rounds kept in the denominator.
+    WIN_START, WIN_END = 1, N_LOC - 1   # frontier loc in [1, 8) => locations 1..7
+    window = [pid for (pid, floc) in log if WIN_START <= floc < WIN_END]
+    wn = len(window)
+    if wn > 0:
+        cnt = {}
+        for pid in window:
+            if pid is not None: cnt[pid] = cnt.get(pid, 0) + 1
+        lead_concentration = (max(cnt.values()) / wn) if cnt else 0.0
+        winner_lead_share = (cnt.get(winner, 0) / wn) if winner is not None else None
+        noleader_share = 1.0 - sum(cnt.values()) / wn
+    else:
+        lead_concentration = float('nan'); winner_lead_share = None; noleader_share = float('nan')
     return {
         "winner": winner, "midpoint_leader": ml, "first_down_team": fd, "draw": draw,
         "first_extractor": first_extractor, "rounds": rounds, "timeout": timeout,
+        "lead_changes": lead_changes, "first_leader": first_leader,
+        "wire_to_wire": wire_to_wire, "lead_concentration": lead_concentration,
+        "winner_lead_share": winner_lead_share, "leader_defined_rounds": len(defined),
+        "noleader_share": noleader_share, "window_rounds": wn,
         "eliminated_pids": [t.pid for t in teams if getattr(t, "eliminated", False)],
         "strengths": {t.pid: t.draft_score for t in teams},
         "wills": {t.pid: sum(g.base[W] for g in t.glads) for t in teams},
         "speeds": {t.pid: sum(g.base[S] for g in t.glads) for t in teams},
         "leths": {t.pid: sum(g.base[L] for g in t.glads) for t in teams},
         "mits":  {t.pid: sum(g.base[M] for g in t.glads) for t in teams},
+        "eff_stats": eff_stats,   # per-team mean EFFECTIVE [L,M,S,V,W] over the game (for effective-rho + Phase-1 calibration)
         "progress": {t.pid: t.loc_idx + (1 if t.extracting else 0) for t in teams},
         "drafters": {t.pid: d for t, d in zip(teams, cfg_drafters(cfg, teams))},
     }
@@ -1173,10 +1282,30 @@ def summarize(results, cfg):
     rho_sp = spearmanr(spv, wf).correlation if len(set(spv))>1 else float('nan')
     rho_l = spearmanr(lv, wf).correlation if len(set(lv))>1 else float('nan')
     rho_m = spearmanr(mv, wf).correlation if len(set(mv))>1 else float('nan')
+    # effective-stat rho: correlate mean EFFECTIVE (base+temp+gear/leader) stats with winning
+    el, em, es, ev, ew, ewf = [], [], [], [], [], []
+    for r in valid:
+        for pid, vec in r.get("eff_stats", {}).items():
+            el.append(vec[L]); em.append(vec[M]); es.append(vec[S]); ev.append(vec[V]); ew.append(vec[W])
+            ewf.append(1 if r["winner"]==pid else 0)
+    def _rho(xs):
+        return spearmanr(xs, ewf).correlation if len(set(xs))>1 else float('nan')
+    rho_l_eff, rho_m_eff, rho_s_eff, rho_v_eff, rho_w_eff = _rho(el), _rho(em), _rho(es), _rho(ev), _rho(ew)
     strong = sum(1 for r in valid if r["winner"]==max(r["strengths"], key=lambda p:r["strengths"][p]))
     strong_wr = strong/len(valid) if valid else float('nan')
     ml = [r for r in valid if r["midpoint_leader"] is not None]
     ml_wr = sum(1 for r in ml if r["winner"]==r["midpoint_leader"])/len(ml) if ml else float('nan')
+    # --- new snowball framework ---
+    w2w = [r["wire_to_wire"] for r in valid if r.get("wire_to_wire") is not None]
+    wire_to_wire_wr = (sum(w2w)/len(w2w)) if w2w else float('nan')
+    lc = [r["lead_changes"] for r in valid if r.get("leader_defined_rounds", 0) > 0]
+    avg_lead_changes = (statistics.mean(lc)) if lc else float('nan')
+    conc = [r["lead_concentration"] for r in valid if not (isinstance(r.get("lead_concentration"), float) and r["lead_concentration"]!=r["lead_concentration"])]
+    mean_lead_concentration = (statistics.mean(conc)) if conc else float('nan')
+    wls = [r["winner_lead_share"] for r in valid if r.get("winner_lead_share") is not None]
+    mean_winner_lead_share = (statistics.mean(wls)) if wls else float('nan')
+    nls = [r["noleader_share"] for r in valid if not (isinstance(r.get("noleader_share"), float) and r["noleader_share"]!=r["noleader_share"])]
+    mean_noleader_share = (statistics.mean(nls)) if nls else float('nan')
     fd = [r for r in valid if r["first_down_team"] is not None]
     fd_wr = sum(1 for r in fd if r["winner"]==r["first_down_team"])/len(fd) if fd else float('nan')
     gaps = []
@@ -1190,15 +1319,23 @@ def summarize(results, cfg):
         "n_games": n, "timeout_rate": timeouts, "baseline_wr": 1.0/cfg.n_players,
         "strongest_wr": strong_wr, "rho_strength": rho_s, "rho_will": rho_w,
         "rho_speed": rho_sp, "rho_leth": rho_l, "rho_mit": rho_m,
+        "rho_leth_eff": rho_l_eff, "rho_mit_eff": rho_m_eff, "rho_speed_eff": rho_s_eff,
+        "rho_vit_eff": rho_v_eff, "rho_will_eff": rho_w_eff,
         "midleader_wr": ml_wr, "firstdown_wr": fd_wr,
+        "wire_to_wire_wr": wire_to_wire_wr, "avg_lead_changes": avg_lead_changes,
+        "lead_concentration": mean_lead_concentration, "winner_lead_share": mean_winner_lead_share,
+        "noleader_share": mean_noleader_share,
         "extract_hold_wr": fe_hold,
         "yomi_richness": yomi,
-        "avg_gap": statistics.mean(gaps) if gaps else float('nan'),
+        # NOTE: avg_gap is the FINAL 1st-vs-2nd margin (blowout vs nailbiter), NOT a snowball measure.
+        "final_margin": statistics.mean(gaps) if gaps else float('nan'),
+        "avg_gap": statistics.mean(gaps) if gaps else float('nan'),  # kept for back-compat; same as final_margin
+        # NOTE: firstdown_wr is a single first-event snapshot (did first team to down an enemy win) — tempo diagnostic only.
         "avg_rounds": statistics.mean([r["rounds"] for r in valid]) if valid else float('nan'),
     }
 
 if __name__ == "__main__":
-    PRUNED = {'RecoilHarness','StaticCloak','RedlineArray','GPS','Caltraps'}
+    PRUNED = {'RecoilHarness','StaticCloak','RedlineArray','Caltraps'}
     cfg = V5_CONFIG()
     out = run_config(cfg, 300, seed=1)
     print("Smoke test (locked V5 baseline, 300 games):")
