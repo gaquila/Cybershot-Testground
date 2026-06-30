@@ -36,7 +36,7 @@ def V5():
         slipstream_graduated=True, slipstream_bonus=3, gate_counter=5,
         gate_attack_prob=0.5, hack_disrupt="freeze", vault_extract_counter=0,
         draw_per_turn=1, hand_size=4, regroup=True, start_hand=4,
-        first_entry_penalty=3,
+        first_entry_penalty=3, down_stagger=1, down_team_move_factor=0.5, ranged_forward_only=False,
         enable_char_abilities=True, enable_loadout_abilities=True,
         enable_equip_abilities=True, soften_drawbacks=False,
     )

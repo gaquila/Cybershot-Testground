@@ -7,14 +7,14 @@ card/draft variance under sensible play => the "decided at the draft" question.
 Approximations marked #APPROX. Stat vector: [L,M,S,V,W].
 Pooled for actions: L,M,S,W.  Per-gladiator only: V (=HP).
 """
-import random, statistics
+import random, statistics, math
 from dataclasses import dataclass, field
 import numpy as np
 from scipy.stats import spearmanr
 
 L, M, S, V, W = 0, 1, 2, 3, 4
 STAT_NAMES = ["L","M","S","V","W"]
-STAT_WEIGHTS = [1.0, 0.6, 1.3, 0.4, 1.4]  # L, M, S, V, W
+STAT_WEIGHTS = [0.90, 1.68, 0.38, 0.73, 1.01]  # L, M, S, V, W -- empirically calibrated (floor 0.22, sum 4.70)
 _YOMI = {"standoff": 0, "multi": 0}
 _COMBAT = {"gate_dec": 0, "gate_atk": 0, "gate_brace": 0, "attacks": 0, "braces": 0, "sprints": 0}
 _REGROUP = {"turns": 0, "regroups": 0, "forced": 0, "voluntary": 0}
@@ -139,11 +139,15 @@ class Config:
     down_factor: float = 0.5
     down_speed_factor: float = 0.5
     down_drag: float = 0.0
+    down_team_move_factor: float = 1.0   # <1.0 = team moves at this fraction of Speed while ANY gladiator is down
+    down_round_mode: str = "pool"        # "pool" | "ceil" | "floor" -- rounding of a downed gladiator's stat contribution
+    down_stagger: float = 0.0            # traversal added to a team when one of its gladiators is downed by combat
     trailblazer_drag: float = 0.0
     slipstream_bonus: float = 0.0
     easy_revive: bool = False
     draft_type: str = "winchester"
     ranged_forward_only: bool = True
+    leader_backward_ranged: bool = False   # if True, the Leader (only) may also fire backward at pursuers
     base_reach: int = 1
     focus_leader: bool = False
     catchup_aggro: float = 0.7
@@ -332,8 +336,9 @@ def build_team(pid, drafted, cfg, rng):
     chars = [c for c in drafted if c["kind"]=="char"]
     loadouts = [c for c in drafted if c["kind"]=="loadout"]
     equips = [c for c in drafted if c["kind"]=="equip"]
-    chosen = sorted(chars, key=lambda c: -sum(
-        CHARACTERS[c["name"]][0][i]*STAT_WEIGHTS[i] for i in range(5)))[:4]
+    chosen = sorted(chars, key=lambda c: -(sum(
+        CHARACTERS[c["name"]][0][i]*STAT_WEIGHTS[i] for i in range(5))
+        + effect_value(c["name"], "char", cfg)))[:4]
     if not chosen: chosen = [{"kind":"char","name":"Khan"}]
     glads = []; used_load = set(); used_equip = set()
     for c in chosen:
@@ -391,7 +396,12 @@ def build_team(pid, drafted, cfg, rng):
 def team_strength(team, cfg):
     p = pooled(team, cfg, False, full=True)
     hp = sum(g.maxhp for g in team.glads)
-    return sum(p[i]*STAT_WEIGHTS[i] for i in range(5)) + hp*0.15
+    stat_val = sum(p[i]*STAT_WEIGHTS[i] for i in range(5)) + hp*0.15
+    eff_val = 0.0
+    for g in team.glads:
+        if g.quirk: eff_val += EFFECT_VALUE.get(g.quirk, 0.0)
+        for tag in g.tags: eff_val += EFFECT_VALUE.get(tag, 0.0)
+    return stat_val + eff_val
 
 def active_quirks(t):
     return {g.quirk for g in t.glads if g.quirk and not g.downed}
@@ -434,11 +444,14 @@ def gear_temp(team, cfg, track):
 def pooled(team, cfg, halfw, full=False):
     cf = 1.0 if full else cfg.down_factor
     sf = 1.0 if full else cfg.down_speed_factor
+    mode = cfg.down_round_mode
     tot = [0.0]*5
     for g in team.glads:
         if g.downed:
-            tot[L]+=g.base[L]*cf; tot[M]+=g.base[M]*cf; tot[V]+=g.base[V]*cf
-            tot[W]+=g.base[W]*cf; tot[S]+=g.base[S]*sf
+            c = [g.base[L]*cf, g.base[M]*cf, g.base[S]*sf, g.base[V]*cf, g.base[W]*cf]
+            if mode == "ceil":   c = [math.ceil(x) for x in c]
+            elif mode == "floor": c = [math.floor(x) for x in c]
+            tot[L]+=c[0]; tot[M]+=c[1]; tot[S]+=c[2]; tot[V]+=c[3]; tot[W]+=c[4]
         else:
             for i in range(5): tot[i] += g.base[i]
     if "eager" in active_quirks(team):
@@ -500,6 +513,13 @@ def _do_regroup(team, cfg, rng):
 def attack_reach(t, cfg):
     return cfg.base_reach + max((g.range_bonus for g in t.glads if not g.downed), default=0)
 
+def ranged_dir_ok(attacker, d, reach, cfg):
+    """d = target.loc_idx - attacker.loc_idx (nonzero). Is a ranged attack allowed by direction/reach?"""
+    if d > 0: return d <= reach            # forward: always allowed within reach
+    if -d > reach: return False            # backward but out of reach
+    if not cfg.ranged_forward_only: return True                       # free-fire mode
+    return cfg.leader_backward_ranged and getattr(attacker, "is_leader_now", False)  # leader-only backward
+
 def best_attack_target(team, teams, cfg, track):
     cands = []
     if track[team.loc_idx].effect == "safe": return None
@@ -508,7 +528,7 @@ def best_attack_target(team, teams, cfg, track):
         if track[o.loc_idx].effect == "safe": continue
         d = o.loc_idx - team.loc_idx; reach = attack_reach(team, cfg)
         in_melee = (d == 0)
-        in_ranged = (0 < d <= reach) if cfg.ranged_forward_only else (0 < abs(d) <= reach)
+        in_ranged = (d != 0) and ranged_dir_ok(team, d, reach, cfg)
         if in_melee or in_ranged: cands.append((o, in_melee))
     if not cands: return None
     cands.sort(key=lambda c: (-c[0].loc_idx, not c[1], c[0].tiebreak))
@@ -532,7 +552,7 @@ def extract_deny_target(team, teams, cfg, track):
     for o in teams:
         if o is team or o.finished_round is not None or not o.extracting: continue
         d = o.loc_idx - team.loc_idx
-        in_range = (d == 0) or ((0 < d <= reach) if cfg.ranged_forward_only else (0 < abs(d) <= reach))
+        in_range = (d == 0) or ranged_dir_ok(team, d, reach, cfg)
         if in_range: cands.append(o)
     if not cands: return None
     return max(cands, key=lambda o: (o.extract_progress, o.tiebreak))
@@ -543,7 +563,7 @@ def incoming_threat(team, teams, cfg, track):
     for o in teams:
         if o is team or o.finished_round is not None: continue
         d = team.loc_idx - o.loc_idx; reach = attack_reach(o, cfg)
-        in_range = (d==0) or ((0<d<=reach) if cfg.ranged_forward_only else (0<abs(d)<=reach))
+        in_range = (d==0) or ranged_dir_ok(o, d, reach, cfg)
         if not in_range: continue
         val = compute_attack(o, team, cfg, track)
         worst = max(worst, val - mit)
@@ -806,7 +826,7 @@ def compute_attack(team, target, cfg, track):
 def resolve_attack(team, target, cfg, track, teams=None):
     if target is None or target.finished_round is not None: return 0
     d = target.loc_idx - team.loc_idx; reach = attack_reach(team, cfg)
-    in_range = (d==0) or ((0<d<=reach) if cfg.ranged_forward_only else (0<abs(d)<=reach))
+    in_range = (d==0) or ranged_dir_ok(team, d, reach, cfg)
     if not in_range: return 0
     val = compute_attack(team, target, cfg, track)
     tp = pooled(target, cfg, halfway(target))
@@ -830,7 +850,12 @@ def resolve_attack(team, target, cfg, track, teams=None):
         dmg = min(max(0, val - mit), cfg.damage_cap)
     if dmg > 0:
         before = sum(g.dmg_total for g in target.glads)
+        downs_before = sum(1 for g in target.glads if g.downed)
         allocate_damage(target, dmg)
+        if cfg.down_stagger:
+            new_downs = sum(1 for g in target.glads if g.downed) - downs_before
+            if new_downs > 0:
+                target.trav_remaining += cfg.down_stagger * new_downs   # downing slows the victim's race
         if cfg.enable_char_abilities and sum(g.dmg_total for g in target.glads) > before:
             if has_ability(target, "go_beyond") or "go_beyond" in active_quirks(target):
                 need = pooled(target, cfg, halfway(target))
@@ -903,6 +928,8 @@ def resolve_move(team, teams, cfg, track):
     if "ghoststep" in active_quirks(team) and loc.smod < 0: speed += (2 if cfg.enable_char_abilities else 1)
     ndown = sum(1 for g in team.glads if g.downed)
     speed -= cfg.down_drag * ndown
+    if ndown > 0 and cfg.down_team_move_factor != 1.0:
+        speed = max(1, speed * cfg.down_team_move_factor)   # whole-team movement penalty while any down; floored at 1
     if cfg.trailblazer_drag or cfg.slipstream_bonus:
         active = [o for o in teams if o.finished_round is None]
         if len(active) > 1:
@@ -1255,7 +1282,7 @@ def V5_CONFIG():
         slipstream_graduated=True, slipstream_bonus=3, gate_counter=5,
         gate_attack_prob=0.5, hack_disrupt="freeze", vault_extract_counter=0,
         draw_per_turn=1, hand_size=4, regroup=True, start_hand=4,
-        first_entry_penalty=3,
+        first_entry_penalty=3, down_stagger=1, down_team_move_factor=0.5, ranged_forward_only=False,
         enable_char_abilities=True, enable_loadout_abilities=True,
         enable_equip_abilities=True, soften_drawbacks=False,
     )
@@ -1330,7 +1357,7 @@ def summarize(results, cfg):
         # NOTE: avg_gap is the FINAL 1st-vs-2nd margin (blowout vs nailbiter), NOT a snowball measure.
         "final_margin": statistics.mean(gaps) if gaps else float('nan'),
         "avg_gap": statistics.mean(gaps) if gaps else float('nan'),  # kept for back-compat; same as final_margin
-        # NOTE: firstdown_wr is a single first-event snapshot (did first team to down an enemy win) — tempo diagnostic only.
+        # NOTE: firstdown_wr is a single first-event snapshot (did first team to down an enemy win) -- tempo diagnostic only.
         "avg_rounds": statistics.mean([r["rounds"] for r in valid]) if valid else float('nan'),
     }
 
