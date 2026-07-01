@@ -142,6 +142,7 @@ class Config:
     down_team_move_factor: float = 1.0   # <1.0 = team moves at this fraction of Speed while ANY gladiator is down
     down_round_mode: str = "pool"        # "pool" | "ceil" | "floor" -- rounding of a downed gladiator's stat contribution
     down_stagger: float = 0.0            # traversal added to a team when one of its gladiators is downed by combat
+    speed_breach_frac: float = 0.0       # fraction of team Speed added to breach progress (gives Speed a job at gates/vault)
     trailblazer_drag: float = 0.0
     slipstream_bonus: float = 0.0
     easy_revive: bool = False
@@ -991,7 +992,10 @@ def resolve_breach(team, teams, cfg, track, rng=None):
         return
     loc = track[team.loc_idx]
     if loc.breach <= 0 or team.breach_remaining <= 0: return
-    team.hack_intent += pooled(team, cfg, halfway(team))[W]
+    p = pooled(team, cfg, halfway(team))
+    team.hack_intent += p[W]
+    if cfg.speed_breach_frac:
+        team.hack_intent += int(cfg.speed_breach_frac * p[S])   # surplus Speed helps breach
     if cfg.enable_loadout_abilities:   # Psionic: use L-as-W when breaching if higher #APPROX
         for g in team.glads:
             if not g.downed and "ld_psionic" in g.tags and g.base[L] > g.base[W]:
@@ -1282,7 +1286,7 @@ def V5_CONFIG():
         slipstream_graduated=True, slipstream_bonus=3, gate_counter=5,
         gate_attack_prob=0.5, hack_disrupt="freeze", vault_extract_counter=0,
         draw_per_turn=1, hand_size=4, regroup=True, start_hand=4,
-        first_entry_penalty=3, down_stagger=1, down_team_move_factor=0.5, ranged_forward_only=False,
+        first_entry_penalty=3, down_stagger=1, down_team_move_factor=0.5, ranged_forward_only=False, speed_breach_frac=0.5,
         enable_char_abilities=True, enable_loadout_abilities=True,
         enable_equip_abilities=True, soften_drawbacks=False,
     )
