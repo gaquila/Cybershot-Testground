@@ -8,7 +8,7 @@ Approximations marked #APPROX. Stat vector: [L,M,S,V,W].
 Pooled for actions: L,M,S,W.  Per-gladiator only: V (=HP).
 """
 import random, statistics, math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 import numpy as np
 from scipy.stats import spearmanr
 
@@ -21,13 +21,14 @@ _REGROUP = {"turns": 0, "regroups": 0, "forced": 0, "voluntary": 0}
 _CAPALARM = {}
 
 ABILITY_CAP = 3
+ABILITY_CAP_ON = True   # V6: play_game sets this from cfg.ability_cap; when False the cap is removed (alarm still fires)
 
 def add_temp(team, stat, amt, source="?"):
     cur = team.temp_mods[stat]
     want = cur + amt
     if want > ABILITY_CAP:
         _CAPALARM[source] = _CAPALARM.get(source, 0) + 1
-        want = ABILITY_CAP
+        if ABILITY_CAP_ON: want = ABILITY_CAP   # V6: cap removed when ABILITY_CAP_ON is False (alarm still recorded)
     team.temp_mods[stat] = want
 _TENSION = {"gn": [], "gf": []}
 
@@ -111,8 +112,19 @@ CARD_TYPES = {
 class Location:
     name: str; trav: list; smod: int = 0; breach: int = 0; effect: str = ""
 
-def build_track(vault_scale, gate_counter=14, gates=(3, 6)):
+def build_track(vault_scale, gate_counter=14, gates=(3, 6), vault_breach=0, layout="standard9"):
     g = int(round(gate_counter * vault_scale))
+    vb = vault_breach if vault_breach > 0 else int(round(17*vault_scale))  # V6: optional FinalVault override
+    if layout == "short7":  # V6: 7-location track (vault pulled to idx6; RadiantOasis/JaggedGroves swapped)
+        return [
+            Location("StartingGate",  [3],   0, 0,  "safe"),
+            Location("TwistedForest", [5,4],-1, 0,  "rangeguard"),
+            Location("OpenPlains",    [10], +1, 0,  "rangeboost"),
+            Location("Chokepoint3",   [3],   0, g,  "gate"),
+            Location("RadiantOasis",  [5],   0, 0,  "heal"),
+            Location("JaggedGroves",  [4,4],-2, 0,  "meleeboost"),
+            Location("FinalVault",    [3],   0, vb, "finalvault"),
+        ]
     locs = [
         Location("StartingGate",  [3],   0, 0, "safe"),
         Location("TwistedForest", [5,4],-1, 0, "rangeguard"),
@@ -122,7 +134,7 @@ def build_track(vault_scale, gate_counter=14, gates=(3, 6)):
         Location("RadiantOasis",  [5],   0, 0, "heal"),
         Location("Chokepoint6",   [3],   0, 0, "meleeboost"),
         Location("VolatileTrench",[7],  -1, 0, "hazard"),
-        Location("FinalVault",    [3],   0, int(round(17*vault_scale)), "finalvault"),
+        Location("FinalVault",    [3],   0, vb, "finalvault"),   # V6: vb honors vault_breach override
     ]
     for gi in gates:
         locs[gi].breach = g; locs[gi].effect = "gate"; locs[gi].trav = [3]
@@ -205,6 +217,12 @@ class Config:
     hybrid_progress_deck: bool = False
     deck_MA: int = 6; deck_MB: int = 3; deck_BA: int = 3; deck_H: int = 2
     deck_MD: int = 3; deck_BD: int = 2; deck_AD: int = 3
+    # --- V6 additions ---
+    brace_lost_on_move: bool = False   # V6 Rule 1: a Move ends an existing brace
+    adjacent_leth_penalty: int = 0     # V6 Rule 2: -N Lethality on adjacent attacks (Ranged tag negates)
+    vault_breach: int = 0              # V6: override FinalVault breach counter (0 = default 17*vault_scale)
+    track_layout: str = "standard9"    # V6: "standard9" (9 loc) or "short7" (7 loc)
+    ability_cap: bool = True           # V6: False removes the +3 temp-bonus cap (alarm still fires)
     max_rounds: int = 100
 
 PRUNED = set()
@@ -804,6 +822,8 @@ def compute_attack(team, target, cfg, track):
     loc = track[team.loc_idx]; tloc = track[target.loc_idx]
     melee_tag = any("melee" in g.tags for g in team.glads if not g.downed)
     ranged_tag = any("ranged" in g.tags for g in team.glads if not g.downed)
+    if cfg.adjacent_leth_penalty and not is_melee and not ranged_tag:   # V6 Rule 2: adjacent -Leth unless Ranged
+        val = max(cfg.attack_floor, val - cfg.adjacent_leth_penalty)
     if is_melee:
         if melee_tag: val += 1
         if "brawler" in active_quirks(team): val += (2 if cfg.enable_char_abilities else 1)
@@ -920,6 +940,8 @@ def deal_to_holder(team, tag, amount):
         deal_to_gladiator(holder, amount)
 
 def resolve_move(team, teams, cfg, track):
+    if cfg.brace_lost_on_move and getattr(team, "braced", False):   # V6 Rule 1: a Move ends an existing brace
+        team.braced = False
     if team.extracting and cfg.vault_extract_counter > 0:
         eff = max(1, pooled(team, cfg, halfway(team))[S] - cfg.gemheart_speed_penalty)
         team.hack_intent += eff; team.moved_this_turn = True
@@ -1067,9 +1089,13 @@ def heal_team(team, amount, cfg):
         team.wellspring_pending = getattr(team, "wellspring_pending", 0) + 1
 
 def play_game(cfg, rng, drafters=None):
+    global ABILITY_CAP_ON, N_LOC
+    ABILITY_CAP_ON = cfg.ability_cap   # V6: apply cap policy for this game
     if drafters is None: drafters = [True]*cfg.n_players
     gates = () if cfg.gate_counter <= 0 else ((4,) if cfg.single_gate else (3, 6))
-    track = build_track(cfg.vault_scale, cfg.gate_counter, gates=gates)
+    track = build_track(cfg.vault_scale, cfg.gate_counter, gates=gates,
+                        vault_breach=cfg.vault_breach, layout=cfg.track_layout)   # V6
+    N_LOC = len(track)   # V6: track-length aware (9 for standard, 7 for short7); read by gear_temp/advance
     picks = (winchester_draft if cfg.draft_type=="winchester" else snake_draft)(cfg, rng, drafters)
     teams = [build_team(i, picks[i], cfg, rng) for i in range(cfg.n_players)]
     return run_engine(cfg, rng, teams, track)
@@ -1289,6 +1315,20 @@ def V5_CONFIG():
         first_entry_penalty=3, down_stagger=1, down_team_move_factor=0.5, ranged_forward_only=False, speed_breach_frac=0.5,
         enable_char_abilities=True, enable_loadout_abilities=True,
         enable_equip_abilities=True, soften_drawbacks=False,
+    )
+
+def V6_CONFIG(track_layout="standard9"):
+    """V6 canonical config. Changes vs V5: T11a 11-card deck; ability cap removed (alarm kept,
+    handled in add_temp); FinalVault breach = 20 (D20-trackable); Rule 1 (brace lost on move);
+    Rule 2 (adjacent attacks -2 Lethality, negated by the Ranged tag).
+    track_layout: 'standard9' or 'short7'."""
+    return replace(V5_CONFIG(),
+        deck_MA=3, deck_MB=2, deck_BA=1, deck_H=1, deck_MD=1, deck_BD=1, deck_AD=2,  # V6: T11a
+        vault_breach=20,               # V6: FinalVault D20-trackable
+        brace_lost_on_move=True,       # V6 Rule 1
+        adjacent_leth_penalty=2,       # V6 Rule 2 (Ranged tag negates)
+        ability_cap=False,             # V6: cap removed, alarm retained
+        track_layout=track_layout,
     )
 
 def run_config(cfg, n_games, seed=0, drafters=None):
