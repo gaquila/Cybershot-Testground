@@ -1,128 +1,108 @@
 # Cybershot-Testground
 
-Simulation code for **Cybershot Gladiators**, a 2–5 player team-based racing card game. This repo contains a Monte-Carlo engine, an archetype-viability harness, and a set of runtime harness layers for drafting, rules-levers, and stat calibration. It is a **design/balance tool**, not the game itself.
-
-Five stats drive everything: **Lethality (L), Mitigate (M), Speed (S), Vitality (V), Willpower (W)** — indices 0–4.
+Simulation code for **Cybershot Gladiators**, a 2–5 player team-based racing card game (optimized for 4). This repo is a **design/balance tool**, not the game. Five stats drive everything: **Lethality (L), Mitigate (M), Speed (S), Vitality (V), Willpower (W)** — indices 0–4.
 
 ---
 
-## ⚠️ Read this first — where the project actually is (V7 arc)
+## ⚠️ READ FIRST — the engine says "V6", but canon is V7-in-the-harness
 
-The engine file (`cybershot_sim.py`) still calls itself "V6". **The live design is V7**, and V7 lives in the harness layer (`v7.py`), *not* in the engine. Do not treat `V6_CONFIG` as canon anymore. Two major issues were found and fixed at the harness level this arc:
+`cybershot_sim.py` still calls itself "V6" internally. **The live design is V7**, living in the harness layer (`v7.py` + `weights_v7.py`), *not* in the engine. To run current canon you install those over the pristine engine. Do **not** treat `V6_CONFIG` as canon.
 
-1. **The draft was broken the entire time (V5 and V6).** Every config used `draft_type="winchester"`, which shuffles characters into one big pool and only deals a subset — so teams fielded **~2.9 of 4 gladiators**, at every player count. The game was designed for **4 gladiators per team**. Fixed in `v7.py` (`v7_draft`): a character draft that guarantees exactly 4, then a gear/tactics winchester. **Any pre-V7 absolute metric (length, timeouts, stat correlations) was measured on crippled teams and is not trustworthy.** Relative comparisons between equally-handicapped teams mostly survive; absolutes do not.
-2. **`STAT_WEIGHTS` was calibrated on the broken draft.** Recalibrated by perturbation in `weights_v7.py`. Willpower turned out to be a near-step function (all value in the first point), so it is now valued by a saturating curve, not a flat weight.
+**The one number that anchors everything:** the pre-V7 draft (`winchester`) fielded only **~2.9 of 4 gladiators per team**, at every player count, in V5 and V6 alike. The game is designed for **4**. This single bug tainted every *absolute* metric the project ever produced (length, timeouts, stat correlations, snowball). It is fixed in `v7.py`. Any result older than the V7 arc is suspect in its absolutes; relative comparisons between equally-handicapped teams mostly survive.
 
-**To run anything at current canon:** install `v7` (and usually `weights_v7`) over the engine. See "V7 quickstart" below.
+**To just run the game at canon, use the Standard Sim:**
+```python
+import standard_sim as SS
+SS.run()                    # full game, all layers, 3p/4p/5p, std9
+```
+
+---
+
+## The layer cake (install order matters)
+
+```
+cybershot_sim.py          pristine engine (mechanics). NEVER edited; everything patches at runtime.
+    + v7.py               V7 canon config + draft fix + rule levers        install() FIRST
+    + weights_v7.py       recalibrated stat valuation (+ Willpower curve)   install() after v7
+    + special_harness.py  17-card Special Tactics layer                     via compose.py, LAST
+        via compose.py    re-points the harness so it CHAINS on top of v7/weights
+                          instead of reverting them (it captures pristine refs at import)
+```
+
+`standard_sim.py` wires all of this correctly for you. If you compose by hand, the order and the `compose` shim are mandatory — see "Gotchas".
 
 ---
 
 ## File map
 
-### Canonical engine
-- **`cybershot_sim.py`** — the deterministic Monte-Carlo engine. Single source of truth for *mechanics*. Stays **pristine**; all experiments monkey-patch it at runtime and restore it. Configs: `V5_CONFIG()` (bit-exact regression reference — never change its output) and `V6_CONFIG("standard9"|"short7")`.
+### Canonical engine (pristine)
+- **`cybershot_sim.py`** — deterministic Monte-Carlo engine, single source of truth for *mechanics*. `V5_CONFIG()` is the bit-exact regression reference (never change its output); `V6_CONFIG(...)` is the pre-V7 base that V7 inherits from.
 
-### V7 canon layer (install these to get current canon)
-- **`v7.py`** — proposed V7 canon config `V7_CANON(track_layout)` **plus the full lever bank**. Encodes the draft fix, the FILO turn order with the speed-first-round rule, the Volatile Trench hazard, and every rule George flagged for testing (breach formula, downed-contribution A/B/C, stagger, slipstream, first-entry penalty, breach disruption, gear hand size, draft mode). Everything toggled via `v7.LEVERS[...]` or `dataclasses.replace(cfg, ...)`. `install()` before `special_harness.install()` if using both.
-- **`weights_v7.py`** — recalibrated `STAT_WEIGHTS` (flat for L/M/S/V) + the **saturating Willpower curve** `Vwill(w)`. Patches `card_value`, `team_strength`, and `build_team`'s character sort so the bot values Willpower on the margin. `install()`/`uninstall()`; restores old weights bit-exact.
+### V7 canon layer (install to get current canon)
+- **`v7.py`** — `V7_CANON(track_layout)` = the **LOCKED** canon (validated across the steps 2–7 battery). Two-part draft (`v7_draft`) guarantees 4 gladiators; FILO turn order with highest-Speed-plays-last round 1; Volatile Trench hazard; and the full **lever bank** for anything still under test, via `v7.LEVERS[...]` or `dataclasses.replace(cfg, ...)`. Install FIRST.
+- **`weights_v7.py`** — recalibrated `STAT_WEIGHTS` (flat `[L .94, M 1.13, S .88, V .61, W 0]`) + the **saturating Willpower curve** `Vwill(w)`. Patches `card_value`, `team_strength`, `build_team`. Install after `v7`.
 
-### Measurement harnesses (install over the engine as needed)
-- **`calibrate_weights.py`** — recomputes `STAT_WEIGHTS` by **seat-rotated perturbation** on mirror teams (add +N of one stat, measure win-lift). Rotates the perturbed team across all seats to cancel the ~±3pp structural seat bias. Run *on top of* `v7`. This is how `weights_v7.py`'s numbers were produced.
-- **`archetype_v6.py`** — V6/V7-correct archetype-viability harness. **Supersedes `archetype_test.py`**, which has latent V5-isms (defines its own `V5()`, calls `build_track()` without `vault_breach=`/`layout=`, and bypasses `play_game()` so `ABILITY_CAP_ON`/`N_LOC` never get set). `archetype_v6.py` fixes all three, sets the globals itself, and keeps a `legacy_track=True` mode that reproduces the old harness **bit-exact** as a regression guard.
-- **`build_bias.py`** — makes the greedy bot play *to its build* (Lethality teams attack more, Speed teams race more) via a stat-tilted `aggro`. Used to test whether an archetype's weakness is real or just a bot that can't play it. `gain=0.0` is bit-exact inert.
-- **`special_harness.py`** — the 17-card Special Tactics prototype layer (unchanged from prior arcs). Runtime patch; `V6_SET` = the canon 17. Bit-exact inert when off.
+### The Standard Sim (the everyday instrument)
+- **`standard_sim.py`** — one call = full game, all layers on, at 3p/4p/5p. `SS.run()`, `SS.run(extra_specials=["ADV_new"])` to test a candidate card, `SS.battery()` for raw dicts. Uses the **12-card Special Tactics core** (the 5 attack cards excluded — see Bot limitations). This is what every new card/tweak gets run through.
+- **`compose.py`** — the shim that makes `special_harness` chain on top of `v7`+`weights_v7` (re-points its import-time `_orig_*` at the live functions) AND threads enabled specials into the v7 gear draft (v7 builds its own pool, so patching `make_pool` alone does NOT inject specials). Required whenever specials run over v7. `standard_sim` uses it internally.
 
-### Experiment records (the scripts that produced findings)
-- **`heal_experiment.py`** — Phase-1 heal-to-revive lever. Finding: forcing revive 0.6→1.0 does ~nothing to length.
-- **`p1_decomp.py`** — the decomposition that explained it: the attack-card length tax is ~77% pure combat friction, ~22% half-speed, ~0 stagger. **Healing cannot dissolve the length tax** (overturns a prior assumption).
+### Measurement harnesses
+- **`calibrate_weights.py`** — recomputes `STAT_WEIGHTS` by **seat-rotated perturbation** on mirror teams (rotation cancels a ~±3pp structural seat bias). Produced `weights_v7.py`'s numbers. Run over `v7`.
+- **`archetype_v7.py`** — archetype viability on the V7 draft (biased two-part draft → real 4-gladiator teams, seat-rotated). **Use this, not archetype_v6**, for V7. NOTE: its `INTENSITY` constants are stale — the recalibrated weights compressed character `card_value` spread to ~11, so the old 5/15/45 intensities swamp card quality; re-scale to ~0.6/1.5/3.0 before trusting it.
+- **`archetype_v6.py`** — the V6-correct archetype harness (fixes `archetype_test.py`'s V5-isms). Superseded by `archetype_v7` for V7 canon because it drafts with the old winchester (~2.9 glads). Kept for history/regression.
+- **`build_bias.py`** — makes the greedy bot play *to its build* (tilted `aggro`), to test whether an archetype weakness is real or a bot that can't play it. `gain=0.0` bit-exact inert.
+- **`special_harness.py`** — the 17-card Special Tactics layer (unchanged). `V6_SET` = the 17 codes. Must be composed via `compose.py` when running over v7.
 
-### Superseded / do not use as canon
-- **`archetype_test.py`** — kept for history; use `archetype_v6.py`.
-- Two-part draft logic once lived in a standalone `draft_fix.py`; it is now folded into `v7.py` (`v7_draft`). Do not reintroduce a second draft path.
+### Experiment records (findings, not part of the live stack)
+- **`heal_experiment.py`** — heal-to-revive lever. Finding: forcing revive 0.6→1.0 does ~nothing to length.
+- **`p1_decomp.py`** — decomposition proving the attack-card length tax is ~77% combat friction, ~22% half-speed, ~0 stagger (healing can't dissolve it). `main()`-guarded.
 
----
-
-## V7 quickstart
-
-```python
-import random, statistics
-import cybershot_sim as C
-import v7, weights_v7 as WT
-
-C.PRUNED = {'RecoilHarness','StaticCloak','RedlineArray','Caltraps'}
-v7.install()          # draft fix + turn order + hazard + levers
-WT.install()          # recalibrated weights + Willpower curve
-
-cfg = v7.V7_CANON("standard9")          # tentative V7 canon
-rng = random.Random(1)                  # ONE rng per batch (see gotchas)
-res = [C.play_game(cfg, rng) for _ in range(1000)]
-print(C.summarize(res, cfg)["avg_rounds"])
-
-WT.uninstall(); v7.uninstall()          # engine is pristine again
-```
-
-**Flip a lever** (test vs canon):
-```python
-from dataclasses import replace
-cfg = replace(v7.V7_CANON("standard9"), speed_breach_frac=1.5)   # config-backed lever
-v7.LEVERS["gear_hand_size"] = 8                                  # module lever
-cfg = v7.set_down_contrib(v7.V7_CANON("standard9"), 0.0)         # downed contribution mode C
-```
+### Superseded — do NOT use
+- **`archetype_test.py`** — pre-V6 V5-isms; use `archetype_v7`.
+- A standalone `draft_fix.py` (two-part draft) once existed; it is now folded into `v7.py`. Do not reintroduce a second draft path.
 
 ---
 
-## V7 canon (tentative) vs levers
+## LOCKED V7 canon
 
-CANON is the tentative lock; each lever is an alternative queued for testing.
-
-| Area | CANON | Levers to test |
+| Area | Setting | Basis |
 |---|---|---|
-| Character draft | mini-winchester (deal 4, take 1, pass) → exactly 4 glads | `random`, `snake` |
-| Gear/tactics draft | 10-card hands → 16 cards/player | 8-card hands → 12/player |
-| Draft pool | 1 of each (58 unique: 17 loadout + 24 equip + 17 tactics) + random dup top-up to fill the deal | — |
-| First-round order | highest-Speed team plays **last** (resolves first, FILO) | off |
-| Volatile Trench | attacked there → +1 direct damage | off |
-| Breach formula | **Willpower only** (`speed_breach_frac=0.0`) — premium breach stat by design | `1.5`, `0.5` |
-| Action repeats | 1 of each type/turn, Move only ×2 | double-breach (parked — bot never chooses it) |
-| Downed contribution | **B: 50%** of stats, then team speed halved (floor 1) | A: 100%, C: 0% |
-| Stagger | on (+1 traversal on new down) | off |
-| Slipstream | on (+3 speed/location behind leader) | off |
-| First-entry penalty | +3 traversal (first team into a location) | +2, 0 |
-| Breach disruption | **off** | `freeze` |
-| Ranged | any direction, −2 Lethality from adjacent unless a standing Ranged glad | (canon) |
+| Character draft | mini-winchester (deal 4, take 1, pass) → exactly 4 | guarantees 4; snake ~= but higher skill (feel-test) |
+| Gear/tactics draft | 10-card hands → 16 cards/player | hand=8 measured slightly worse |
+| Draft pool | 1 of each (58 unique: 17 loadout + 24 equip + 17 tactics) + random dup top-up | duplicates are fine |
+| First-round order | highest-Speed team plays LAST (resolves first, FILO) | free Speed buff |
+| Breach | **Willpower only** (`speed_breach_frac=0.0`) | Speed contribution spikes timeouts, doesn't rehab Speed |
+| Downed | contribute **50%** of stats, then team speed halved (floor 1) | best flavor; 100% too weak |
+| Stagger | **OFF** (`down_stagger=0`) | shorter, best lift; complexity for negative value |
+| Slipstream | **ON** (`slipstream_bonus=3`) | the one anti-snowball mechanic that measurably earns it |
+| First-entry penalty | **+2** (`first_entry_penalty=2`) | +0 crashed lead-changes; +2 keeps them ~4.7 |
+| Breach disruption | **OFF** (`hack_disrupt="none"`) | `freeze` bought nothing |
+| Ranged | any direction, −2 Lethality adjacent unless standing Ranged glad | (V6 Rule 2) |
+| Special Tactics | **12-card core** (all V6_SET minus the 5 attack-tagged cards) | attack cards toxic to pace/snowball at every player count |
 
-Roster note: 4×players characters needed (3p=12, 4p=16, 5p=20; we own 17). `v7._char_pool` tops up short rosters with random duplicate characters. 5p needs +3 real designs to avoid duplicates.
+Measured canon state (4p std9): **~26 rounds, ~6% timeouts, snowball concentration ~0.485, draft-skill lift ~1.3×.** 5p is the healthiest count; 3p is the mildest snowball outlier.
 
----
-
-## Recalibrated stat valuation (V7)
-
-Old `STAT_WEIGHTS` `[0.90, 1.68, 0.38, 0.73, 1.01]` were fitted on the broken draft. New (in `weights_v7.py`):
-
-- **Flat weights** `[L 0.94, M 1.13, S 0.88, V 0.61, W 0.0]` — measured per-point win-value, normalised so a typical point ≈ 1.0. The W slot is **0.0 on purpose**; Willpower value comes entirely from the curve.
-- **Willpower** = saturating curve `Vwill(w) = (1/0.045)·0.461·w/(w+0.352)`, valued **on the margin**. Marginal per point: 1st ≈ 7.6, 2nd ≈ 1.1, 3rd ≈ 0.46, 4th ≈ 0.25, 5th ≈ 0.15. Meaning: Willpower is a **threshold you clear** (enough to breach), not a stat you stack.
-
-Caveats to carry with any number: weights are **bot-relative** (a human may get more from Speed) and **config-relative** (re-measure after any breach-formula/track change).
+Roster: need 4×players characters (3p=12, 4p=16, 5p=20; own 17). `v7._char_pool` random-dups short rosters; **5p currently fields ~15% duplicate gladiators** until +3 real character designs land.
 
 ---
 
-## Gotchas (all still live)
-- **One `random.Random(seed)` per batch** — never re-seed inside a loop/comprehension (degenerate results). Metrics shift with N and seed; small deltas across runs are RNG, not drift.
-- **Install order**: `v7.install()` before `special_harness.install()` (both may wrap `_commit_v2`; v7 first so the harness wraps the v7 version).
-- **`archetype_v6` / calibration bypass `play_game`**, so they set `C.ABILITY_CAP_ON` and `C.N_LOC` themselves. Any new harness that bypasses `play_game` must do the same or it silently runs V5-capped, 9-location rules.
-- **Seat bias**: identical mirror teams do not win 1/n by seat (~±3pp seat-0-vs-last). Any perturbation/mirror measurement must rotate across seats.
-- `V5_CONFIG` regression guard: patch → verify `V5_CONFIG()` output unchanged → run. Every harness here is built to be bit-exact inert at its neutral setting; keep it that way.
-- **`extract_hold_wr` is `nan`** under configs without an extraction counter; `nan != nan`, so don't flag it as a mismatch.
+## Recalibrated stat valuation
 
-## Interpreting results — bot limitations
-The AI is **greedy** (no lookahead). It heals only reactively (never proactively/to-revive), can't set up brace-timing or cross-card combos, and never chooses to double-breach. Trust metrics for **pacing, snowball, tempo/draw/attack cards**; treat weak numbers for **heal/defensive/timing/combo cards and Rule 1** as *unmeasured*, not *bad*. Those need physical playtest.
+Old `STAT_WEIGHTS [0.90,1.68,0.38,0.73,1.01]` were fitted on the broken draft (team size leaked into every stat). New (in `weights_v7.py`):
+- **Flat** `[L 0.94, M 1.13, S 0.88, V 0.61, W 0.0]` — measured per-point win-value, normalised so a typical point ≈ 1.0. **W slot is 0.0 on purpose**; Willpower value comes entirely from the curve.
+- **Willpower** = saturating curve `Vwill(w) = (1/0.045)·0.461·w/(w+0.352)`, valued on the margin. Marginal: 1st ≈ 7.6, 2nd ≈ 1.1, 3rd ≈ 0.46 … → Willpower is a *threshold you clear* (enough to breach), not a stack.
+- Caveats: weights are **bot-relative** (a human may get more from Speed) and **config-relative** (re-measure after any breach-formula / track change).
 
-## Test sequence (approved, in progress)
-1. ✅ Recalibrate `STAT_WEIGHTS` (perturbation, V7 canon) → `weights_v7.py`.
-2. ⏳ Canon baseline battery — 4p, both tracks (the new reference point).
-3. Single-lever sweeps vs canon (breach → downed A/B/C → stagger → slipstream → first-entry → disruption → hand size → draft mode).
-4. Interaction checks on the anti-snowball trio (stagger × slipstream × first-entry) and breach × draft.
-5. Archetype viability (`archetype_v6.py`) on the winning canon.
-6. Special Tactics layer re-run on real 4-gladiator teams (revisit the +36% length tax).
-7. 3p / 5p battery last.
-```
+---
+
+## Gotchas (all live — these bit us this arc)
+- **One `random.Random(seed)` per BATCH.** Never `random.Random(s)` inside the per-game loop/comprehension — it re-seeds every game and collapses the sample (you'll see ~17 rounds / ~1.5 lead-changes and every batch identical). The single easiest way to produce garbage.
+- **Compose order for specials:** `v7.install()` → `weights_v7.install()` → `compose.install_harness_over_live()` → `compose.enable_specials_in_v7_draft()`. `special_harness` captures pristine `_orig_*` at import and will silently REVERT v7+weights if installed naively. Just use `standard_sim`.
+- **Specials must be threaded into the v7 draft.** v7 builds its own gear pool; patching `make_pool` alone does not inject specials. `compose.enable_specials_in_v7_draft()` handles it.
+- **Harnesses that bypass `play_game`** (calibration, archetype) must set `C.ABILITY_CAP_ON = cfg.ability_cap` and `C.N_LOC = len(track)` themselves, or they silently run V5-capped / 9-location rules.
+- **Seat bias:** identical mirror teams do NOT win 1/n by seat (~±3pp seat-0 vs last). Any perturbation/mirror/archetype measurement must rotate the subject across seats.
+- **Always** verify `V5_CONFIG()` output is unchanged after any new patch (bit-exact regression), and that a new harness is bit-exact inert at its neutral setting.
+- `extract_hold_wr` / `yomi_richness` are `nan` under configs lacking those counters; `nan != nan`, don't flag as a mismatch.
+
+## Bot limitations (what the sim CANNOT measure)
+The AI is **greedy** (no lookahead): heals only reactively (never to-revive), can't time brace/defends, can't sequence combos, never chooses to double-breach, and plays attack cards bluntly (swings whenever able). Trust metrics for **pacing, snowball, draw/tempo economy, stat balance**. Treat weak numbers for **heal/defensive/timing/combo/attack cards** as *unmeasured*, not *bad* — carry to physical playtest ("bot-blind keepers"). The 5 attack cards are excluded from the Standard Sim core for exactly this reason: the sim sees only their worst case.

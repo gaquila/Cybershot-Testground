@@ -133,19 +133,24 @@ _DEFAULTS = dict(LEVERS)
 
 
 def V7_CANON(track_layout="standard9"):
-    """Tentative V7 canon. Inherits V6 then applies George's rulings."""
+    """LOCKED V7 canon (validated across the steps 2-7 battery, this arc).
+
+    All settings below are the outcome of the single-lever sweeps + interaction
+    checks, not tentative defaults. Two changed from the mid-arc "proposed"
+    values after validation: down_stagger 1->0 and first_entry_penalty 3->2.
+    """
     cfg = replace(
         C.V6_CONFIG(track_layout),
-        draft_type="v7",            # anything != "winchester" routes to our draft
-        speed_breach_frac=0.0,      # 7  CANON: Willpower only
-        hack_disrupt="none",        # 10.2 CANON: breach disruption OFF
-        first_entry_penalty=3,      # 10.1 CANON
-        down_stagger=1,             # 8.3 CANON
-        slipstream_bonus=3,         # 8.4 CANON
-        down_factor=0.5,            # 8.2 CANON B (kept in sync by set_down_contrib)
-        down_speed_factor=0.5,
-        ranged_forward_only=False,  # 10.4 CANON
-        adjacent_leth_penalty=2,    # 10.4 CANON
+        draft_type="v7",            # 1   two-part draft -> exactly 4 gladiators
+        speed_breach_frac=0.0,      # 7   breach = Willpower only (premium stat)
+        hack_disrupt="none",        # 10.2 breach disruption OFF
+        first_entry_penalty=2,      # 10.1 softened 3->2 (kept lead-changes @4.70)
+        down_stagger=0,             # 8.3 stagger OFF (shorter, best lift)
+        slipstream_bonus=3,         # 8.4 slipstream ON (the anti-snowball earner)
+        down_factor=0.5,            # 8.2 downed contribute 50% (mode B)
+        down_speed_factor=0.5,      #     kept in sync w/ down_factor
+        ranged_forward_only=False,  # 10.4 ranged any direction
+        adjacent_leth_penalty=2,    # 10.4 -2 Lethality from adjacent unless Ranged
     )
     return cfg
 
