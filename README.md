@@ -24,7 +24,8 @@ SS.run()                    # full game, all layers, 3p/4p/5p, std9
 cybershot_sim.py          pristine engine (mechanics). NEVER edited; everything patches at runtime.
     + v7.py               V7 canon config + draft fix + rule levers        install() FIRST
     + weights_v7.py       recalibrated stat valuation (+ Willpower curve)   install() after v7
-    + special_harness.py  17-card Special Tactics layer                     via compose.py, LAST
+    + v8_cards.py         V8 candidate content (new chars / gear / tactics) install() after weights, before compose
+    + special_harness.py  17-card Special Tactics layer (+ V8 tactics)      via compose.py, LAST
         via compose.py    re-points the harness so it CHAINS on top of v7/weights
                           instead of reverting them (it captures pristine refs at import)
 ```
@@ -43,15 +44,18 @@ cybershot_sim.py          pristine engine (mechanics). NEVER edited; everything 
 - **`weights_v7.py`** — recalibrated `STAT_WEIGHTS` (flat `[L .94, M 1.13, S .88, V .61, W 0]`) + the **saturating Willpower curve** `Vwill(w)`. Patches `card_value`, `team_strength`, `build_team`. Install after `v7`.
 
 ### The Standard Sim (the everyday instrument)
-- **`standard_sim.py`** — one call = full game, all layers on, at 3p/4p/5p. `SS.run()`, `SS.run(extra_specials=["ADV_new"])` to test a candidate card, `SS.battery()` for raw dicts. Uses the **12-card Special Tactics core** (the 5 attack cards excluded — see Bot limitations). This is what every new card/tweak gets run through.
+- **`standard_sim.py`** — one call = full game, all layers on, at 3p/4p/5p. `SS.run()`, `SS.run(extra_specials=["ADV_new"])` to test a candidate card, `SS.battery()` for raw dicts. Uses the **12-card Special Tactics core** (the 5 attack cards excluded — see Bot limitations). This is what every new card/tweak gets run through. **Reports the PACE TRIPLE** — `median_rounds` + `finisher_mean` + `p90_rounds` alongside `timeout_rate` — because `avg_rounds` blends typical length with the 100-round deadlock tail (a timed-out game contributes a flat `max_rounds`). Read median/finisher for length, timeout/p90 for the deadlock tail; never one without the other. (Typical canon game ≈ 21 rounds; `avg_rounds` ≈ 26–30 is the tail talking.)
 - **`compose.py`** — the shim that makes `special_harness` chain on top of `v7`+`weights_v7` (re-points its import-time `_orig_*` at the live functions) AND threads enabled specials into the v7 gear draft (v7 builds its own pool, so patching `make_pool` alone does NOT inject specials). Required whenever specials run over v7. `standard_sim` uses it internally.
 
 ### Measurement harnesses
 - **`calibrate_weights.py`** — recomputes `STAT_WEIGHTS` by **seat-rotated perturbation** on mirror teams (rotation cancels a ~±3pp structural seat bias). Produced `weights_v7.py`'s numbers. Run over `v7`.
-- **`archetype_v7.py`** — archetype viability on the V7 draft (biased two-part draft → real 4-gladiator teams, seat-rotated). **Use this, not archetype_v6**, for V7. NOTE: its `INTENSITY` constants are stale — the recalibrated weights compressed character `card_value` spread to ~11, so the old 5/15/45 intensities swamp card quality; re-scale to ~0.6/1.5/3.0 before trusting it.
-- **`archetype_v6.py`** — the V6-correct archetype harness (fixes `archetype_test.py`'s V5-isms). Superseded by `archetype_v7` for V7 canon because it drafts with the old winchester (~2.9 glads). Kept for history/regression.
+- **`archetype_v7.py`** — archetype viability on the V7 draft (biased two-part draft → real 4-gladiator teams, seat-rotated). **Use this, not archetype_v6**, for V7. Imports `INTENSITY` from `archetype_v6`.
+- **`archetype_v6.py`** — the V6-correct archetype harness (fixes `archetype_test.py`'s V5-isms). Superseded by `archetype_v7` for V7 canon because it drafts with the old winchester (~2.9 glads); kept for history/regression AND because it holds the `ARCHETYPES` / `INTENSITY` constants `archetype_v7` imports. **`INTENSITY` rescaled `{5,15,45}` → `{0.6,1.5,3.0}`** (the bias term is `strength*stat_contrib` ADDED to card_value; at 45 it swamped the weights_v7-compressed gear spread and made every archetype look non-viable). Validated to reproduce the step-5 picture: Fortress strongest ~0.33 WR / lift ~1.26, extremes taxed, Speed weakest.
 - **`build_bias.py`** — makes the greedy bot play *to its build* (tilted `aggro`), to test whether an archetype weakness is real or a bot that can't play it. `gain=0.0` bit-exact inert.
-- **`special_harness.py`** — the 17-card Special Tactics layer (unchanged). `V6_SET` = the 17 codes. Must be composed via `compose.py` when running over v7.
+- **`special_harness.py`** — the 17-card Special Tactics layer. `V6_SET` = the 17 codes; `SPECIAL_CARDS` also holds V8 tactics added by `v8_cards`. Must be composed via `compose.py` when running over v7.
+
+### V8 candidate content layer
+- **`v8_cards.py`** — the V8 card set (new characters, loadouts, equipment, tactics) added ON TOP of the pristine engine by wrapping — same install/uninstall/inert discipline as every other layer. `install()` AFTER v7+weights, BEFORE `compose.install_harness_over_live()`; uninstall in reverse. Adds 8 characters (Feratu/Sephira/Vulturus/Baal wired; Stephenos/Finch/Enigma/Pythia are stat-body-only — their reactive/info abilities are **playtest-only, not modeled**), re-quirks Jayred (`night_thief` → `saboteur`), 2 loadouts (Trailblazer, Bloodletter), 3 equipment (PowerCord, PanicShield, OverdriveCell), and 6 tactics (Aegis, SecondWind, Establish, Measure, SowChaos, Gambit). Bot-blind portions (stack reorder/shuffle, reactive branches, information) are `#APPROX`/`n/m` — flagged inline. `DEBUG=True` enables per-ability fire-counters (`_COUNTS`). V5 bit-exact after an install/uninstall cycle; screened cursorily (median/timeout/snowball/lift held, no dominant new build).
 
 ### Experiment records (findings, not part of the live stack)
 - **`heal_experiment.py`** — heal-to-revive lever. Finding: forcing revive 0.6→1.0 does ~nothing to length.
@@ -82,7 +86,7 @@ cybershot_sim.py          pristine engine (mechanics). NEVER edited; everything 
 
 Measured canon state (4p std9): **~26 rounds, ~6% timeouts, snowball concentration ~0.485, draft-skill lift ~1.3×.** 5p is the healthiest count; 3p is the mildest snowball outlier.
 
-Roster: need 4×players characters (3p=12, 4p=16, 5p=20; own 17). `v7._char_pool` random-dups short rosters; **5p currently fields ~15% duplicate gladiators** until +3 real character designs land.
+Roster: need 4×players characters (3p=12, 4p=16, 5p=20). The base engine owns 17; **`v8_cards` adds 8 more → 25**, which retires the 5p duplicate-gladiator problem (cursory battery showed 5p deadlock 10.4%→7.8% with the V8 roster). `v7._char_pool` still random-dups if a roster is ever short.
 
 ---
 

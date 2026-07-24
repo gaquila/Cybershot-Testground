@@ -61,6 +61,26 @@ def _cfg(track, n):
     return replace(v7.V7_CANON(track), n_players=n)
 
 
+def _pace(games):
+    """The PACE TRIPLE + tail: typical length that is NOT contaminated by the
+    100-round deadlock tail, reported alongside the non-finish rate so the two
+    are never read apart. avg_rounds smears timeouts (each a flat max_rounds)
+    into the mean; median/finisher_mean do not. Excluding timeouts from a lone
+    length number is the opposite trap (more deadlocks -> looks shorter), so
+    timeout_rate/p90 travel WITH them."""
+    rounds = [g["rounds"] for g in games]
+    fin = [g["rounds"] for g in games if not g["timeout"]]
+    rs = sorted(rounds)
+    return {
+        "median_rounds": statistics.median(rounds),
+        "finisher_mean": statistics.mean(fin) if fin else float("nan"),
+        "p90_rounds": rs[min(len(rs) - 1, int(0.90 * len(rs)))],
+    }
+
+
+_PACE_KEYS = ("median_rounds", "finisher_mean", "p90_rounds")
+
+
 def _measure(track, n, pool, seeds, ngames):
     cfg = _cfg(track, n)
     active = pool is not None and len(pool) > 0
@@ -71,13 +91,19 @@ def _measure(track, n, pool, seeds, ngames):
         H.HS.pool_copies = 1
         H.HS.max_specials = 2
     S = []
+    P = []
     for s in seeds:
         rng = random.Random(s)
-        S.append(C.summarize([C.play_game(cfg, rng) for _ in range(ngames)], cfg))
+        games = [C.play_game(cfg, rng) for _ in range(ngames)]
+        S.append(C.summarize(games, cfg))
+        P.append(_pace(games))
     if active:
         compose.disable_specials_in_v7_draft()
         compose.uninstall_harness()
-    return {k: statistics.mean(x[k] for x in S) for k in METRICS}
+    out = {k: statistics.mean(x[k] for x in S) for k in METRICS}
+    for k in _PACE_KEYS:
+        out[k] = statistics.mean(x[k] for x in P)
+    return out
 
 
 def battery(players=(3, 4, 5), track="standard9", n=1000, seeds=SEEDS,
@@ -105,15 +131,18 @@ def run(players=(3, 4, 5), track="standard9", n=1000, seeds=SEEDS,
     print(f"STANDARD SIM  --  V7 canon + weights + [{layer}]  --  {track}, "
           f"{len(seeds)}x{n} games")
     print("=" * 96)
-    print(f"{'players':<9}{'rounds':>8}{'t/out':>8}{'leadCh':>8}{'conc':>8}"
-          f"{'strWR':>8}{'lift':>7}{'midLd':>8}{'1stDn':>8}{'w2w':>7}")
+    # PACE TRIPLE first (median/finisher-mean = typical length, uncontaminated),
+    # then the non-finish tail (t/out, p90) that MUST be read alongside them,
+    # then avg_rounds kept for continuity with prior-arc numbers.
+    print(f"{'players':<9}{'medRnd':>8}{'finAvg':>8}{'t/out':>8}{'p90':>6}"
+          f"{'avgRnd':>8}{'leadCh':>8}{'conc':>8}{'strWR':>8}{'lift':>7}")
     for p in sorted(res):
         r = res[p]
-        print(f"{p:<9}{r['avg_rounds']:>8.1f}{r['timeout_rate']:>8.3f}"
-              f"{r['avg_lead_changes']:>8.2f}{r['lead_concentration']:>8.3f}"
-              f"{r['strongest_wr']:>8.3f}{r['strongest_wr']/r['baseline_wr']:>7.2f}"
-              f"{r['midleader_wr']:>8.3f}{r['firstdown_wr']:>8.3f}"
-              f"{r['wire_to_wire_wr']:>7.2f}")
+        print(f"{p:<9}{r['median_rounds']:>8.1f}{r['finisher_mean']:>8.1f}"
+              f"{r['timeout_rate']:>8.3f}{r['p90_rounds']:>6.0f}"
+              f"{r['avg_rounds']:>8.1f}{r['avg_lead_changes']:>8.2f}"
+              f"{r['lead_concentration']:>8.3f}{r['strongest_wr']:>8.3f}"
+              f"{r['strongest_wr']/r['baseline_wr']:>7.2f}")
     print(f"\n{'players':<9}{'rhoMit':>8}{'rhoSpd':>8}{'rhoLeth':>8}{'rhoWill':>8}")
     for p in sorted(res):
         r = res[p]

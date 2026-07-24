@@ -24,7 +24,15 @@ from cybershot_sim import L, M, S, V, W
 C.PRUNED = {'RecoilHarness', 'StaticCloak', 'RedlineArray', 'Caltraps'}
 
 ARCHETYPES = {"Hacker": [W], "Cannon": [L], "Speed": [S], "Fortress": [M, V]}
-INTENSITY = {"mild": 5.0, "moderate": 15.0, "extreme": 45.0}
+# V7 rescale. Old {5,15,45} were fitted before weights_v7 compressed the gear
+# card_value spread (~10-30). The bias term is strength*stat_contrib and is
+# ADDED to card_value, so at 45 a 3-point stat adds 135 and the archetype
+# drafter picks purely by bias stat, ignoring quality -> every archetype looks
+# non-viable (measurement artifact). Rescaled so the bias tilts picks without
+# erasing quality: at extreme=3.0 a 3-point stat adds ~9 (comparable to spread).
+# Validated: reproduces the step-5 picture (Fortress strongest ~0.33 WR / lift
+# ~1.26, extremes taxed, Speed weakest). Install v7+weights_v7 before measuring.
+INTENSITY = {"mild": 0.6, "moderate": 1.5, "extreme": 3.0}
 
 
 def biased_value(have, card, cfg, bias_stats, strength):
